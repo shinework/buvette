@@ -4,11 +4,13 @@
 #define RST_PIN 5
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
-//HX711 loadcell;
+MFRC522::MIFARE_Key key;
 
 // Balance
 int sck_pin = 22;
 int din_pin = 24;
+float startScale = 0;
+float stopScale = 0;
 
 // Motor
 int motor_pin = A0;
@@ -18,12 +20,14 @@ int button_pin = 49;
 
 int turns = 10; // how fast the motor runs
 int turnAmount = 30; // how many turns the motor makes
+
 unsigned long currentTime;
 unsigned long timer;
 unsigned long loopTime;
 
-int buttonPressed;
-bool tmpButtonPressed = false;
+bool isButtonPressed;
+bool didButtonPressed = false;
+bool firstLoop = true;
 
 const long LOADCELL_OFFSET = 50682624;
 const long LOADCELL_DIVIDER = 5895655;
@@ -31,96 +35,234 @@ const long LOADCELL_DIVIDER = 5895655;
 const int LOADCELL_DOUT_PIN = 24;
 const int LOADCELL_SCK_PIN = 22;
 Hx711 scale(din_pin, sck_pin);
-String latestCardId = "";
+
+String prevLoopCardId = "";
 String cardId = "";
 
-//Hx711 loadcell;
 void setup()
 {
-  Serial.begin(57600);    // Initialize serial communications with the PC
-  while (!Serial);    // Do nothing if no serial port is opened (added for Arduinos based on ATMEGA32U4)
-  SPI.begin();      // Init SPI bus
-  mfrc522.PCD_Init();   // Init MFRC522
-  delay(4);       // Optional delay. Some board do need more time after init to be ready, see
+  Serial.begin(57600);
+  while (!Serial);
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  // Prepare the key
+  for (byte i = 0; i < 6; i++) {
+    key.keyByte[i] = 0xFF;
+  }
+
   pinMode(button_pin, OUTPUT);
-  /*
-      pinMode(motor_pin, OUTPUT);
-      currentTime = millis();
-      timer = millis();
-  */
-  currentTime = millis();
   loopTime = currentTime;
+}
+
+void stopMotor() {
+  analogWrite(motor_pin, 0);
+}
+
+void runMotor() {
+  analogWrite(motor_pin, turns);
+  turns = turns + turnAmount;
+  loopTime = currentTime; // Updates loopTime
+}
+
+String getCardId() {
+  byte letter;
+
+  String id = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++)
+  {
+    //Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+    //Serial.print(mfrc522.uid.uidByte[i], HEX);
+    id.concat(String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " "));
+    id.concat(String(mfrc522.uid.uidByte[i], HEX));
+  }
+
+  return id;
+}
+
+void handleStart() {
+  if (!didButtonPressed && isButtonPressed) {
+    startScale = scale.getGram();
+    //Serial.println(scale.getGram(), 1);
+  }
+}
+
+void handleStop() {
+  if (didButtonPressed && !isButtonPressed) {
+    stopScale = scale.getGram();
+    float measure = (startScale - stopScale) * 19.28;
+
+    //Serial.println("Grammes à facturer :");
+    //Serial.println(stopScale, 1);
+    //Serial.println(measure, 1);
+    writeMeasure(measure);
+  }
+}
+
+void resetCard() {
+  byte sector         = 1;
+  byte blockAddr      = 4;
+  byte trailerBlock   = 7;
+
+  MFRC522::StatusCode status;
+  byte buffer[18];
+  byte size = sizeof(buffer);
+  status = (MFRC522::StatusCode) mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
+
+  if (status != MFRC522::STATUS_OK) {
+    Serial.println(F("PCD_Authenticate() failed: "));
+    return;
+  }
+
+  // Read
+  status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(blockAddr, buffer, &size);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print(F("MIFARE_Read() failed: "));
+    Serial.println(mfrc522.GetStatusCodeName(status));
+  }
+
+  byte dataBlock[]    = {
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+  };
+
+  // Write data to the block
+  status = (MFRC522::StatusCode) mfrc522.MIFARE_Write(blockAddr, dataBlock, 16);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print(F("MIFARE_Write() failed: "));
+    Serial.println(mfrc522.GetStatusCodeName(status));
+  }
+
+  Serial.println("Carte réinitialisée:");
+  mfrc522.PCD_StopCrypto1();
+}
+
+void writeMeasure(float measure)
+{
+  byte sector         = 1;
+  byte blockAddr      = 4;
+  byte trailerBlock   = 7;
+
+  MFRC522::StatusCode status;
+  byte buffer[18];
+  byte size = sizeof(buffer);
+  status = (MFRC522::StatusCode) mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
+
+  if (status != MFRC522::STATUS_OK) {
+    Serial.println(F("PCD_Authenticate() failed: "));
+    return;
+  }
+
+  // Read
+  status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(blockAddr, buffer, &size);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print(F("MIFARE_Read() failed: "));
+    Serial.println(mfrc522.GetStatusCodeName(status));
+  }
+
+  String currentMeasureString = (char*)buffer;
+
+  float newMeasure = currentMeasureString.toFloat() + measure;
+  String newMeasureString = String(newMeasure);
+  byte dataBlock[]    = {
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+  };
+  newMeasureString.getBytes(dataBlock, newMeasureString.length());
+
+  // Write data to the block
+  status = (MFRC522::StatusCode) mfrc522.MIFARE_Write(blockAddr, dataBlock, 16);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print(F("MIFARE_Write() failed: "));
+    Serial.println(mfrc522.GetStatusCodeName(status));
+  }
+
+  //Serial.print("Measure writed in RFID card");
+  Serial.println("Nouvelle quantité enregistrée sur la carte:");
+  Serial.println(newMeasureString);
+  
+  mfrc522.PCD_StopCrypto1();
+}
+
+void readMeasure()
+{
+  byte sector         = 1;
+  byte blockAddr      = 4;
+  byte trailerBlock   = 7;
+
+  MFRC522::StatusCode status;
+  byte buffer[18];
+  byte size = sizeof(buffer);
+  status = (MFRC522::StatusCode) mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
+
+  if (status != MFRC522::STATUS_OK) {
+    Serial.println(F("PCD_Authenticate() failed: "));
+    return;
+  }
+
+  status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(blockAddr, buffer, &size);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print(F("MIFARE_Read() failed: "));
+    Serial.println(mfrc522.GetStatusCodeName(status));
+  }
+
+  String measure = (char*)buffer;
+  Serial.println("Quantité actuelle sur la carte:");
+  Serial.println(measure);
+
+  mfrc522.PCD_StopCrypto1();
 }
 
 void loop()
 {
   currentTime = millis();
-  buttonPressed = digitalRead(button_pin);   // read the input pin
 
-  if (latestCardId != cardId) {
-    Serial.println("Nouveau client");
-    latestCardId = cardId;
-
-  }
-  if (buttonPressed == false) {
-    analogWrite(motor_pin, 0);
-    //Serial.println(scale.getGram(), 1);
-  }
-
-  if (tmpButtonPressed == true && buttonPressed == false) {
-    tmpButtonPressed = false;
-    Serial.println(scale.getGram(), 1);
-  }
-
-  if (buttonPressed) {
-    tmpButtonPressed = true;
-  }
-
-  // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
   if (!mfrc522.PICC_IsNewCardPresent()) {
-    analogWrite(motor_pin, 0);
+    stopMotor();
     return;
   }
 
-  // Select one of the cards
   if (!mfrc522.PICC_ReadCardSerial()) {
+    stopMotor();
     return;
   }
-
-  byte letter;
-
-  cardId = "";
-  for (byte i = 0; i < mfrc522.uid.size; i++)
-  {
-    //Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-    //Serial.print(mfrc522.uid.uidByte[i], HEX);
-    cardId.concat(String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " "));
-    cardId.concat(String(mfrc522.uid.uidByte[i], HEX));
+  
+  if (firstLoop) {
+    //resetCard();
+    readMeasure();
+    firstLoop = false;
   }
 
-  if (cardId != "" && buttonPressed) {
-    if (currentTime >= (loopTime + 20)) {
-      analogWrite(motor_pin, turns);
-      turns = turns + turnAmount;
-      loopTime = currentTime; // Updates loopTime
-    }
+  isButtonPressed = digitalRead(button_pin);
+
+  if (prevLoopCardId != cardId) {
+    //Serial.println("Nouveau client");
+    prevLoopCardId = cardId;
   }
 
-  if (buttonPressed == false) {
-    analogWrite(motor_pin, 0);
+  if (!isButtonPressed) {
+    stopMotor();
   }
 
-  /*
-    currentTime = millis();
-    buttonPressed = digitalRead(button_pin);   // read the input pin
+  handleStart();
+  handleStop();
 
-    if (currentTime >= (loopTime + 20)) {
-      analogWrite(motor_pin, turns);
-      turns = turns + turnAmount;
-      loopTime = currentTime; // Updates loopTime
-    }
-    } else {
-    analogWrite(motor_pin, 0);
-    }
-  */
+  cardId = getCardId();
+
+  if (cardId != "" && isButtonPressed && currentTime >= (loopTime + 20)) {
+    runMotor();
+  }
+
+  didButtonPressed = isButtonPressed;
+}
+
+void dump_byte_array(byte *buffer, byte bufferSize) {
+  for (byte i = 0; i < bufferSize; i++) {
+    Serial.print(buffer[i] < 0x10 ? " 0" : " ");
+    Serial.print(buffer[i], HEX);
+  }
 }
