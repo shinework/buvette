@@ -1,14 +1,31 @@
 #include "HX711.h"
 #include <MFRC522.h>
+#include <TimerOne.h>
 #define SS_PIN 53
-#define RST_PIN 5
+#define RST_PIN A3
+// #define RST_PIN 5
+#define DEBUG 0
+#define MOTOR_ONLY 1
+
+
+
+
+
+
+
+
+
+
+
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
 MFRC522::MIFARE_Key key;
 
 // Balance
-int sck_pin = 22;
-int din_pin = 24;
+// int sck_pin = 22;
+// int din_pin = 24;
+int sck_pin = A1;
+int din_pin = A2;
 float startScale = 0;
 float stopScale = 0;
 
@@ -41,6 +58,9 @@ String cardId = "";
 
 void setup()
 {
+  //Timer1.initialize(9000000); // 9 second
+  //Timer1.attachInterrupt(getScale);
+  
   Serial.begin(57600);
   while (!Serial);
   SPI.begin();
@@ -51,8 +71,12 @@ void setup()
     key.keyByte[i] = 0xFF;
   }
 
-  pinMode(button_pin, OUTPUT);
+  pinMode(button_pin, INPUT_PULLUP);
   loopTime = currentTime;
+
+  if (!MOTOR_ONLY) {
+    startScale = scale.getGram();
+  }
 }
 
 void stopMotor() {
@@ -80,10 +104,19 @@ String getCardId() {
   return id;
 }
 
+void getScale() {
+  if (!isButtonPressed) {
+    startScale = scale.getGram();
+    Serial.println("prise pesée");
+    Serial.println(startScale);
+  }
+}
+
 void handleStart() {
   if (!didButtonPressed && isButtonPressed) {
-    startScale = scale.getGram();
-    //Serial.println(scale.getGram(), 1);
+    Serial.println("Début pesée:");
+    //startScale = scale.getGram();
+    Serial.println(startScale);
   }
 }
 
@@ -92,10 +125,11 @@ void handleStop() {
     stopScale = scale.getGram();
     float measure = (startScale - stopScale) * 19.28;
 
-    //Serial.println("Grammes à facturer :");
-    //Serial.println(stopScale, 1);
-    //Serial.println(measure, 1);
+    Serial.println("Grammes à facturer :");
+    Serial.println(stopScale, 1);
+    Serial.println(measure, 1);
     writeMeasure(measure);
+    startScale = stopScale;
   }
 }
 
@@ -219,13 +253,27 @@ void readMeasure()
 
 void loop()
 {
+  isButtonPressed = digitalRead(button_pin) == LOW; 
   currentTime = millis();
+
+  if (MOTOR_ONLY) {
+    isButtonPressed = digitalRead(button_pin) == LOW;
+    if (!isButtonPressed) {
+      stopMotor();
+    }
+
+    if (isButtonPressed && currentTime >= (loopTime + 20)) {
+      runMotor();
+    }
+  
+    return;
+  }
 
   if (!mfrc522.PICC_IsNewCardPresent()) {
     stopMotor();
     return;
   }
-
+  
   if (!mfrc522.PICC_ReadCardSerial()) {
     stopMotor();
     return;
@@ -237,10 +285,9 @@ void loop()
     firstLoop = false;
   }
 
-  isButtonPressed = digitalRead(button_pin);
-
+  isButtonPressed = digitalRead(button_pin) == LOW;
+ 
   if (prevLoopCardId != cardId) {
-    //Serial.println("Nouveau client");
     prevLoopCardId = cardId;
   }
 
@@ -248,7 +295,7 @@ void loop()
     stopMotor();
   }
 
-  handleStart();
+  //handleStart();
   handleStop();
 
   cardId = getCardId();
